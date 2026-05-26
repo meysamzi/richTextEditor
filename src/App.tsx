@@ -1,103 +1,159 @@
-import { useRef } from "react";
-
+import { AutoFocusPlugin } from "@lexical/react/LexicalAutoFocusPlugin";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
-import { RichTextPlugin } from "@lexical/react/LexicalRichTextPlugin";
 import { ContentEditable } from "@lexical/react/LexicalContentEditable";
+import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
-import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
+import { RichTextPlugin } from "@lexical/react/LexicalRichTextPlugin";
+import {
+  $isTextNode,
+  DOMConversionMap,
+  DOMExportOutput,
+  DOMExportOutputMap,
+  isHTMLElement,
+  Klass,
+  LexicalEditor,
+  LexicalNode,
+  ParagraphNode,
+  TextNode,
+} from "lexical";
 
-import { $getRoot } from "lexical";
+import ExampleTheme from "./ExampleTheme";
+import ToolbarPlugin from "./plugins/ToolbarPlugin";
+import TreeViewPlugin from "./plugins/TreeViewPlugin";
+import DiffPlugin from "./plugins/DiffPlugin";
+import { parseAllowedColor, parseAllowedFontSize } from "./styleConfig";
 
-function MyOnChangePlugin() {
-  const previousTextRef = useRef("");
+const placeholder = "Enter some rich text...";
 
-  function onChange(editorState) {
-    editorState.read(() => {
-      const currentText = $getRoot().getTextContent();
+const removeStylesExportDOM = (
+  editor: LexicalEditor,
+  target: LexicalNode,
+): DOMExportOutput => {
+  const output = target.exportDOM(editor);
+  if (output && isHTMLElement(output.element)) {
+    // Remove all inline styles and classes if the element is an HTMLElement
+    // Children are checked as well since TextNode can be nested
+    // in i, b, and strong tags.
+    for (const el of [
+      output.element,
+      ...output.element.querySelectorAll("[style],[class]"),
+    ]) {
+      el.removeAttribute("class");
+      el.removeAttribute("style");
+    }
+  }
+  return output;
+};
 
-      const previousText = previousTextRef.current;
+const exportMap: DOMExportOutputMap = new Map<
+  Klass<LexicalNode>,
+  (editor: LexicalEditor, target: LexicalNode) => DOMExportOutput
+>([
+  [ParagraphNode, removeStylesExportDOM],
+  [TextNode, removeStylesExportDOM],
+]);
 
-      if (previousText !== currentText) {
-        console.log("Previous:", previousText);
+const getExtraStyles = (element: HTMLElement): string => {
+  // Parse styles from pasted input, but only if they match exactly the
+  // sort of styles that would be produced by exportDOM
+  let extraStyles = "";
+  const fontSize = parseAllowedFontSize(element.style.fontSize);
+  const backgroundColor = parseAllowedColor(element.style.backgroundColor);
+  const color = parseAllowedColor(element.style.color);
+  if (fontSize !== "" && fontSize !== "15px") {
+    extraStyles += `font-size: ${fontSize};`;
+  }
+  if (backgroundColor !== "" && backgroundColor !== "rgb(255, 255, 255)") {
+    extraStyles += `background-color: ${backgroundColor};`;
+  }
+  if (color !== "" && color !== "rgb(0, 0, 0)") {
+    extraStyles += `color: ${color};`;
+  }
+  return extraStyles;
+};
 
-        console.log("Current:", currentText);
+const constructImportMap = (): DOMConversionMap => {
+  const importMap: DOMConversionMap = {};
 
-        console.log("Detected Change!");
-
-        previousTextRef.current = currentText;
+  // Wrap all TextNode importers with a function that also imports
+  // the custom styles implemented by the playground
+  for (const [tag, fn] of Object.entries(TextNode.importDOM() || {})) {
+    importMap[tag] = (importNode) => {
+      const importer = fn(importNode);
+      if (!importer) {
+        return null;
       }
-    });
+      return {
+        ...importer,
+        conversion: (element) => {
+          const output = importer.conversion(element);
+          if (
+            output === null ||
+            output.forChild === undefined ||
+            output.after !== undefined ||
+            output.node !== null
+          ) {
+            return output;
+          }
+          const extraStyles = getExtraStyles(element);
+          if (extraStyles) {
+            const { forChild } = output;
+            return {
+              ...output,
+              forChild: (child, parent) => {
+                const textNode = forChild(child, parent);
+                if ($isTextNode(textNode)) {
+                  textNode.setStyle(textNode.getStyle() + extraStyles);
+                }
+                return textNode;
+              },
+            };
+          }
+          return output;
+        },
+      };
+    };
   }
 
-  return <OnChangePlugin onChange={onChange} />;
-}
+  return importMap;
+};
+
+const editorConfig = {
+  html: {
+    export: exportMap,
+    import: constructImportMap(),
+  },
+  namespace: "React.js Demo",
+  nodes: [ParagraphNode, TextNode],
+  onError(error: Error) {
+    throw error;
+  },
+  theme: ExampleTheme,
+};
 
 export default function App() {
-  const initialConfig = {
-    namespace: "Editor",
-
-    onError(error) {
-      console.error(error);
-    },
-
-    editorState: `
-    {
-      "root": {
-        "children": [
-          {
-            "children": [
-              {
-                "detail": 0,
-                "format": 0,
-                "mode": "normal",
-                "style": "",
-                "text": "This is a sample document with one page.",
-                "type": "text",
-                "version": 1
-              }
-            ],
-            "direction": null,
-            "format": "",
-            "indent": 0,
-            "type": "paragraph",
-            "version": 1
-          }
-        ],
-        "direction": null,
-        "format": "",
-        "indent": 0,
-        "type": "root",
-        "version": 1
-      }
-    }
-    `,
-  };
-
   return (
-    <LexicalComposer initialConfig={initialConfig}>
-      <div
-        style={{
-          maxWidth: "700px",
-          margin: "40px auto",
-          border: "1px solid #ccc",
-          padding: "20px",
-        }}
-      >
-        <RichTextPlugin
-          contentEditable={
-            <ContentEditable
-              style={{
-                minHeight: "200px",
-                outline: "none",
-              }}
-            />
-          }
-          placeholder={<div>Type here...</div>}
-        />
-
-        <HistoryPlugin />
-
-        <MyOnChangePlugin />
+    <LexicalComposer initialConfig={editorConfig}>
+      <div className="editor-container">
+        <ToolbarPlugin />
+        <div className="editor-inner">
+          <RichTextPlugin
+            contentEditable={
+              <ContentEditable
+                className="editor-input"
+                aria-placeholder={placeholder}
+                placeholder={
+                  <div className="editor-placeholder">{placeholder}</div>
+                }
+              />
+            }
+            ErrorBoundary={LexicalErrorBoundary}
+          />
+          <HistoryPlugin />
+          <AutoFocusPlugin />
+          <DiffPlugin />
+          <TreeViewPlugin />
+        </div>
       </div>
     </LexicalComposer>
   );
